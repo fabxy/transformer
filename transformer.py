@@ -173,7 +173,11 @@ class Transformer(nn.Module):
 
         return res.unsqueeze(1).repeat(1, X.shape[1], 1)
         
-    def forward(self, X):
+    def forward(self, X, max_len=None):
+
+        # set maximum sampling length
+        if max_len is None:
+            max_len = X.shape[0] + 10
 
         # input embedding
         X = self.in_emb(X)
@@ -186,14 +190,10 @@ class Transformer(nn.Module):
 
         # output
         T = torch.ones((1,X.shape[1]), dtype=torch.int64) * self.stok
-
-        # TODO: consider max length
-        while not ((T[-1] == self.etok) | (T[-1] == self.ptok)).all():
+        while (len(T) < max_len) and not ((T[-1] == self.etok) | (T[-1] == self.ptok)).all():
 
             # output embedding
             Y = self.out_emb(T)
-
-            # TODO: output embeddings are offset by one position
 
             # positional encoding
             Y += self.pos_enc(Y)
@@ -203,7 +203,7 @@ class Transformer(nn.Module):
 
             # linear
             # TODO: check: embedding layers, we multiply those weights by sqrt(dmodel)
-            Y = torch.mm(Y[-1,:,:], self.out_emb.weight.T / math.sqrt(self.out_emb.weight.shape[1]))
+            Y = torch.mm(Y[-1], self.out_emb.weight.T / math.sqrt(self.out_emb.weight.shape[1]))
 
             # softmax
             Y = torch.softmax(Y, dim=1)
