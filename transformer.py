@@ -169,7 +169,7 @@ class Transformer(nn.Module):
         pos = torch.arange(X.shape[0]).repeat(X.shape[-1],1).T
         idx = torch.arange(X.shape[-1]).repeat(X.shape[0],1)
 
-        res = torch.sin(pos / 10000**(2*idx/X.shape[-1]) + torch.remainder(idx,2) * torch.pi/2)
+        res = torch.sin(pos / 10000**((idx-torch.remainder(idx,2))/X.shape[-1]) + torch.remainder(idx,2) * torch.pi/2)
 
         return res.unsqueeze(1).repeat(1, X.shape[1], 1)
         
