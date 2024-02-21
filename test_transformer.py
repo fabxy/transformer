@@ -9,6 +9,9 @@ from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 
 from transformer import Transformer
+from tqdm import tqdm
+
+torch.autograd.set_detect_anomaly(True)
 
 # Get data
 # We need to modify the URLs for the dataset since the links to the original dataset are broken
@@ -104,9 +107,40 @@ hyperparams = {
     'stok': BOS_IDX,
     'etok': EOS_IDX,
     'ptok': PAD_IDX,
+    'drop': 0.1,
 }
 
 model = Transformer(**hyperparams)
 
-for src, tgt in train_dataloader:
-    pred = model(src)
+# Define training
+train_params = {
+    'beta1': 0.9,
+    'beta2': 0.98,
+    'eps': 1e-9,
+    'lr': 1e-4,
+    'init_steps': 4000,
+    'steps': int(1e5),
+    'eps_ls': 0.1,
+}
+
+optimizer = torch.optim.Adam(model.parameters(), lr=train_params['lr'], betas=(train_params['beta1'], train_params['beta2']), eps=train_params['eps'])
+
+lr_lambda = lambda step: hyperparams['dm']**(-0.5) * min((step+1)**(-0.5), (step+1)**(-0.5) * train_params['init_steps']**(-1.5))
+scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+loss_fun = torch.nn.CrossEntropyLoss(label_smoothing=train_params['eps_ls'])
+
+model.train()
+for src, tgt in tqdm(train_dataloader):
+
+    optimizer.zero_grad()
+
+    toks, probs = model(src, max_len=tgt.shape[0])
+
+    # res = pad_sequence([pred, tgt], padding_value=PAD_IDX, batch_first=True)
+
+    loss = loss_fun(torch.permute(probs, (1, 2, 0)), tgt.T)
+    loss.backward()
+
+    optimizer.step()
+    scheduler.step()

@@ -42,7 +42,7 @@ class Attention(nn.Module):
         # V: nv x nbatch x dv (nv=nk)
 
         # dot product: nq x nbatch x nk
-        y = torch.einsum('ijk, kjl -> ijl', Q, K.T)
+        y = torch.einsum('ijk, ljk -> ijl', Q, K)
         
         # scaling
         y /= math.sqrt(K.shape[2])
@@ -103,9 +103,10 @@ class MHA(nn.Module):
 
 class AttentionBlock(nn.Module):
 
-    def __init__(self, h, dm, dff, decoder=False):
+    def __init__(self, h, dm, dff, drop=0.0, decoder=False):
         super().__init__()
 
+        self.dropout = nn.Dropout(p=drop)
         self.decoder = decoder
 
         self.self_attention = MHA(h, dm, mask=self.decoder)
@@ -118,28 +119,28 @@ class AttentionBlock(nn.Module):
         self.MLP = MLP(dm, dm, 1, dff)
         self.norms.append(nn.LayerNorm(dm))
 
-        # TODO: make sure that embedding is last dimension
-
     def forward(self, X):
 
         if self.decoder:
             X, Y = X
 
         # (masked) self-attention
-        # TODO: do we need to create copies at some point?
-        X += self.self_attention(X)
-        X = self.norms[0](X)
+        res = X
+        X = self.dropout(self.self_attention(X))
+        X = self.norms[0](X + res)
 
         # attention
         if self.decoder:
-            X += self.attention(X, Y)
-            X = self.norms[1](X)
+            res = X
+            X = self.dropout(self.attention(X, Y))
+            X = self.norms[1](X + res)
 
         # MLP
         nseq = X.shape[0]
         dm = X.shape[-1]
-        X += self.MLP(X.reshape(-1,dm)).reshape(nseq, -1, dm)
-        X = self.norms[-1](X)
+        res = X
+        X = self.dropout(self.MLP(X.reshape(-1,dm)).reshape(nseq, -1, dm))
+        X = self.norms[-1](X + res)
 
         if self.decoder:
             return (X, Y)
@@ -149,7 +150,7 @@ class AttentionBlock(nn.Module):
 
 class Transformer(nn.Module):
 
-    def __init__(self, dvocin, dvocout, dm, h, dff, nenc, ndec, stok=0, etok=1, ptok=2):
+    def __init__(self, dvocin, dvocout, dm, h, dff, nenc, ndec, stok=0, etok=1, ptok=2, drop=0.0):
         super().__init__()
 
         # store start, end and padding tokens
@@ -160,9 +161,10 @@ class Transformer(nn.Module):
         self.in_emb = nn.Embedding(dvocin, dm)
         self.out_emb = nn.Embedding(dvocout, dm)
 
-        self.encoder = nn.Sequential(*[AttentionBlock(h, dm, dff)]*nenc)
+        self.encoder = nn.Sequential(*[AttentionBlock(h, dm, dff, drop)]*nenc)
+        self.decoder = nn.Sequential(*[AttentionBlock(h, dm, dff, drop, decoder=True)]*ndec)
 
-        self.decoder = nn.Sequential(*[AttentionBlock(h, dm, dff, decoder=True)]*ndec)
+        self.dropout = nn.Dropout(p=drop)
 
     def pos_enc(self, X):
 
@@ -185,11 +187,16 @@ class Transformer(nn.Module):
         # positional encoding
         X += self.pos_enc(X)
 
+        # dropout
+        X = self.dropout(X)
+
         # encoder
         X = self.encoder(X)
 
         # output
         T = torch.ones((1,X.shape[1]), dtype=torch.int64) * self.stok
+        P = torch.zeros((1,X.shape[1],self.out_emb.weight.shape[0]), dtype=torch.float32)
+        P[:,:,self.stok] = 1.0
         while (len(T) < max_len) and not ((T[-1] == self.etok) | (T[-1] == self.ptok)).all():
 
             # output embedding
@@ -197,6 +204,9 @@ class Transformer(nn.Module):
 
             # positional encoding
             Y += self.pos_enc(Y)
+
+            # dropout
+            Y = self.dropout(Y)
 
             # decoder
             Y, _ = self.decoder((Y, X))
@@ -207,12 +217,12 @@ class Transformer(nn.Module):
 
             # softmax
             Y = torch.softmax(Y, dim=1)
+            P = torch.cat((P, Y.unsqueeze(0)), dim=0)
 
             # greedy sampling
             t = torch.argmax(Y, dim=1)
             mask = (T[-1] == self.etok) | (T[-1] == self.ptok)
             t[mask] = self.ptok
+            T = torch.cat((T, t.unsqueeze(0)), dim=0)
 
-            T = torch.cat((T, t.reshape(1,-1)), dim=0)
-
-        return T
+        return T, P
