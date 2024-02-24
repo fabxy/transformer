@@ -80,10 +80,14 @@ class MHA(nn.Module):
             dv = dk
 
         # initialize weights
-        self.WQ = nn.ParameterList([nn.Parameter(torch.Tensor(dm, dk).uniform_(-1/math.sqrt(dm), 1/math.sqrt(dm)), requires_grad=True) for _ in range(self.h)])
-        self.WK = nn.ParameterList([nn.Parameter(torch.Tensor(dm, dk).uniform_(-1/math.sqrt(dm), 1/math.sqrt(dm)), requires_grad=True) for _ in range(self.h)])
-        self.WV = nn.ParameterList([nn.Parameter(torch.Tensor(dm, dv).uniform_(-1/math.sqrt(dm), 1/math.sqrt(dm)), requires_grad=True) for _ in range(self.h)])
-        self.WO = nn.Parameter(torch.Tensor(h*dv, dm).uniform_(-1/math.sqrt(h*dv), 1/math.sqrt(h*dv)), requires_grad=True)
+        # self.WQ = nn.ParameterList([nn.Parameter(torch.Tensor(dm, dk).uniform_(-1/math.sqrt(dm), 1/math.sqrt(dm)), requires_grad=True) for _ in range(self.h)])
+        # self.WK = nn.ParameterList([nn.Parameter(torch.Tensor(dm, dk).uniform_(-1/math.sqrt(dm), 1/math.sqrt(dm)), requires_grad=True) for _ in range(self.h)])
+        # self.WV = nn.ParameterList([nn.Parameter(torch.Tensor(dm, dv).uniform_(-1/math.sqrt(dm), 1/math.sqrt(dm)), requires_grad=True) for _ in range(self.h)])
+        # self.WO = nn.Parameter(torch.Tensor(h*dv, dm).uniform_(-1/math.sqrt(h*dv), 1/math.sqrt(h*dv)), requires_grad=True)
+        self.WQ = nn.ModuleList([nn.Linear(dm, dk) for _ in range(self.h)])
+        self.WK = nn.ModuleList([nn.Linear(dm, dk) for _ in range(self.h)])
+        self.WV = nn.ModuleList([nn.Linear(dm, dv) for _ in range(self.h)])
+        self.WO = nn.Linear(h*dv, dm)
 
         # initialize attention layer
         self.attention = Attention(mask=mask)
@@ -96,11 +100,11 @@ class MHA(nn.Module):
         if V is None:
             V = K
 
-        y = [self.attention(torch.matmul(Q, self.WQ[i]), torch.matmul(K, self.WK[i]), torch.matmul(V, self.WV[i]), key_mask=key_mask) for i in range(self.h)]
+        y = [self.attention(self.WQ[i](Q), self.WK[i](K), self.WV[i](V), key_mask=key_mask) for i in range(self.h)]
 
         y = torch.concat(y, dim=2)
 
-        y = torch.matmul(y, self.WO)
+        y = self.WO(y)
 
         return y
     
@@ -114,14 +118,15 @@ class AttentionBlock(nn.Module):
         self.decoder = decoder
 
         self.self_attention = MHA(h, dm, mask=self.decoder)
-        self.norms = [nn.LayerNorm(dm)]
+        norms = [nn.LayerNorm(dm)]
         
         if self.decoder:
             self.attention = MHA(h, dm)
-            self.norms.append(nn.LayerNorm(dm))
+            norms.append(nn.LayerNorm(dm))
 
         self.MLP = MLP(dm, dm, 1, dff)
-        self.norms.append(nn.LayerNorm(dm))
+        norms.append(nn.LayerNorm(dm))
+        self.norms = nn.ModuleList(norms)
 
     def forward(self, X, Y=None, mask1=None, mask2=None):
 
@@ -159,8 +164,11 @@ class Transformer(nn.Module):
         self.in_emb = nn.Embedding(dvocin, dm)
         self.out_emb = nn.Embedding(dvocout, dm)
 
-        self.encoder = [AttentionBlock(h, dm, dff, drop) for _ in range(nenc)]
-        self.decoder = [AttentionBlock(h, dm, dff, drop, decoder=True) for _ in range(ndec)]
+        self.encoder = nn.ModuleList([AttentionBlock(h, dm, dff, drop) for _ in range(nenc)])
+        self.decoder = nn.ModuleList([AttentionBlock(h, dm, dff, drop, decoder=True) for _ in range(ndec)])
+
+        self.enc_norm = nn.LayerNorm(dm)
+        self.dec_norm = nn.LayerNorm(dm)
 
         self.linear = nn.Linear(dm, dvocout)
 
@@ -199,10 +207,12 @@ class Transformer(nn.Module):
         # encoder
         for layer in self.encoder:
             X = layer(X, mask1=X_mask)
+        X = self.enc_norm(X)
 
         # decoder
         for layer in self.decoder:
             Y = layer(Y, X, mask1=Y_mask, mask2=X_mask)
+        Y = self.dec_norm(Y)
         
         # linear
         Y = self.linear(Y)
