@@ -34,7 +34,7 @@ class Attention(nn.Module):
 
         self.mask = mask
 
-    def forward(self, Q, K, V):
+    def forward(self, Q, K, V, key_mask=None):
 
         # input dimensions: 
         # Q: nq x nbatch x dq 
@@ -49,7 +49,11 @@ class Attention(nn.Module):
 
         # masking
         if self.mask:
-            y -= torch.triu(torch.ones(y.shape[0], y.shape[-1]) * torch.inf, diagonal=1).unsqueeze(1).repeat(1,y.shape[1],1)
+            mask = torch.triu(torch.ones(y.shape[0], y.shape[-1], dtype=torch.bool), diagonal=1).unsqueeze(1).repeat(1,y.shape[1],1)
+            y = y.masked_fill(mask == True, -torch.inf)
+        if key_mask is not None:
+            mask = key_mask.T.unsqueeze(0).repeat(y.shape[0], 1, 1)
+            y = y.masked_fill(mask == True, -torch.inf)
 
         # softmax
         y = torch.softmax(y, dim=2)
@@ -84,7 +88,7 @@ class MHA(nn.Module):
         # initialize attention layer
         self.attention = Attention(mask=mask)
 
-    def forward(self, Q, K=None, V=None):
+    def forward(self, Q, K=None, V=None, key_mask=None):
 
         if K is None:
             K = Q
@@ -92,7 +96,7 @@ class MHA(nn.Module):
         if V is None:
             V = K
 
-        y = [self.attention(torch.matmul(Q, self.WQ[i]), torch.matmul(K, self.WK[i]), torch.matmul(V, self.WV[i])) for i in range(self.h)]
+        y = [self.attention(torch.matmul(Q, self.WQ[i]), torch.matmul(K, self.WK[i]), torch.matmul(V, self.WV[i]), key_mask=key_mask) for i in range(self.h)]
 
         y = torch.concat(y, dim=2)
 
@@ -119,20 +123,17 @@ class AttentionBlock(nn.Module):
         self.MLP = MLP(dm, dm, 1, dff)
         self.norms.append(nn.LayerNorm(dm))
 
-    def forward(self, X):
-
-        if self.decoder:
-            X, Y = X
+    def forward(self, X, Y=None, mask1=None, mask2=None):
 
         # (masked) self-attention
         res = X
-        X = self.dropout(self.self_attention(X))
+        X = self.dropout(self.self_attention(X, key_mask=mask1))
         X = self.norms[0](X + res)
 
         # attention
         if self.decoder:
             res = X
-            X = self.dropout(self.attention(X, Y))
+            X = self.dropout(self.attention(X, Y, key_mask=mask2))
             X = self.norms[1](X + res)
 
         # MLP
@@ -142,10 +143,7 @@ class AttentionBlock(nn.Module):
         X = self.dropout(self.MLP(X.reshape(-1,dm)).reshape(nseq, -1, dm))
         X = self.norms[-1](X + res)
 
-        if self.decoder:
-            return (X, Y)
-        else:
-            return X
+        return X
     
 
 class Transformer(nn.Module):
@@ -161,8 +159,10 @@ class Transformer(nn.Module):
         self.in_emb = nn.Embedding(dvocin, dm)
         self.out_emb = nn.Embedding(dvocout, dm)
 
-        self.encoder = nn.Sequential(*[AttentionBlock(h, dm, dff, drop)]*nenc)
-        self.decoder = nn.Sequential(*[AttentionBlock(h, dm, dff, drop, decoder=True)]*ndec)
+        self.encoder = [AttentionBlock(h, dm, dff, drop) for _ in range(nenc)]
+        self.decoder = [AttentionBlock(h, dm, dff, drop, decoder=True) for _ in range(ndec)]
+
+        self.linear = nn.Linear(dm, dvocout)
 
         self.dropout = nn.Dropout(p=drop)
 
@@ -175,54 +175,40 @@ class Transformer(nn.Module):
 
         return res.unsqueeze(1).repeat(1, X.shape[1], 1)
         
-    def forward(self, X, max_len=None):
+    def forward(self, X, Y):
 
-        # set maximum sampling length
-        if max_len is None:
-            max_len = X.shape[0] + 10
+        # X: source sequence: ns x nbatch
+        # Y: target sequence: nt x nbatch
 
-        # input embedding
-        X = self.in_emb(X)
+        # get padding masks
+        X_mask = (X == self.ptok)
+        Y_mask = (Y == self.ptok)
 
-        # positional encoding
+        # embeddings
+        X = self.in_emb(X) * math.sqrt(self.in_emb.weight.shape[1])
+        Y = self.out_emb(Y) * math.sqrt(self.out_emb.weight.shape[1])
+
+        # positional encodings
         X += self.pos_enc(X)
+        Y += self.pos_enc(Y)
 
         # dropout
         X = self.dropout(X)
+        Y = self.dropout(Y)
 
         # encoder
-        X = self.encoder(X)
+        for layer in self.encoder:
+            X = layer(X, mask1=X_mask)
 
-        # output
-        T = torch.ones((1,X.shape[1]), dtype=torch.int64) * self.stok
-        P = torch.zeros((1,X.shape[1],self.out_emb.weight.shape[0]), dtype=torch.float32)
-        P[:,:,self.stok] = 1.0
-        while (len(T) < max_len) and not ((T[-1] == self.etok) | (T[-1] == self.ptok)).all():
+        # decoder
+        for layer in self.decoder:
+            Y = layer(Y, X, mask1=Y_mask, mask2=X_mask)
+        
+        # linear
+        Y = self.linear(Y)
 
-            # output embedding
-            Y = self.out_emb(T)
+        # softmax
+        Y = torch.softmax(Y, dim=-1)
 
-            # positional encoding
-            Y += self.pos_enc(Y)
+        return Y
 
-            # dropout
-            Y = self.dropout(Y)
-
-            # decoder
-            Y, _ = self.decoder((Y, X))
-
-            # linear
-            # TODO: check: embedding layers, we multiply those weights by sqrt(dmodel)
-            Y = torch.mm(Y[-1], self.out_emb.weight.T / math.sqrt(self.out_emb.weight.shape[1]))
-
-            # softmax
-            Y = torch.softmax(Y, dim=1)
-            P = torch.cat((P, Y.unsqueeze(0)), dim=0)
-
-            # greedy sampling
-            t = torch.argmax(Y, dim=1)
-            mask = (T[-1] == self.etok) | (T[-1] == self.ptok)
-            t[mask] = self.ptok
-            T = torch.cat((T, t.unsqueeze(0)), dim=0)
-
-        return T, P
