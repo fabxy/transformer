@@ -94,6 +94,8 @@ def collate_fn(batch):
 
 train_dataloader = DataLoader(train_iter, batch_size=BATCH_SIZE, collate_fn=collate_fn)
 
+# Set seed
+torch.manual_seed(0)
 
 # Define model
 hyperparams = {
@@ -101,9 +103,9 @@ hyperparams = {
     'dvocout': len(vocab_transform[TGT_LANGUAGE]),
     'dm': 512,
     'h': 8,
-    'dff': 2048,
-    'nenc': 6,
-    'ndec': 6,
+    'dff': 512,
+    'nenc': 3,
+    'ndec': 3,
     'stok': BOS_IDX,
     'etok': EOS_IDX,
     'ptok': PAD_IDX,
@@ -120,27 +122,31 @@ train_params = {
     'lr': 1e-4,
     'init_steps': 4000,
     'steps': int(1e5),
-    'eps_ls': 0.1,
+    'ignore_idx': PAD_IDX,
+    'eps_ls': 0.0,
+    'epochs': 18
 }
 
 optimizer = torch.optim.Adam(model.parameters(), lr=train_params['lr'], betas=(train_params['beta1'], train_params['beta2']), eps=train_params['eps'])
 
-lr_lambda = lambda step: hyperparams['dm']**(-0.5) * min((step+1)**(-0.5), (step+1)**(-0.5) * train_params['init_steps']**(-1.5))
-scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+# lr_lambda = lambda step: hyperparams['dm']**(-0.5) * min((step+1)**(-0.5), (step+1)**(-0.5) * train_params['init_steps']**(-1.5))
+# scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
-loss_fun = torch.nn.CrossEntropyLoss(label_smoothing=train_params['eps_ls'])
+loss_fun = torch.nn.CrossEntropyLoss(ignore_index=train_params['ignore_idx'], label_smoothing=train_params['eps_ls'])
 
-model.train()
-for src, tgt in tqdm(train_dataloader):
+for epoch in range(train_params['epochs']):
 
-    optimizer.zero_grad()
+    model.train()
+    for src, tgt in (p := tqdm(train_dataloader, desc=f"Epoch {epoch}")):
 
-    toks, probs = model(src, max_len=tgt.shape[0])
+        optimizer.zero_grad()
 
-    # res = pad_sequence([pred, tgt], padding_value=PAD_IDX, batch_first=True)
+        probs = model(src, tgt[:-1]) 
 
-    loss = loss_fun(torch.permute(probs, (1, 2, 0)), tgt.T)
-    loss.backward()
+        loss = loss_fun(torch.permute(probs, (1, 2, 0)), tgt[1:].T)
+        loss.backward()
 
-    optimizer.step()
-    scheduler.step()
+        optimizer.step()
+        # scheduler.step()
+
+        p.set_postfix(loss=loss.item())
