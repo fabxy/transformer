@@ -49,7 +49,7 @@ class Attention(nn.Module):
 
         # masking
         if self.mask:
-            mask = torch.triu(torch.ones(y.shape[0], y.shape[-1], dtype=torch.bool), diagonal=1).unsqueeze(1).repeat(1,y.shape[1],1)
+            mask = torch.triu(torch.ones(y.shape[0], y.shape[-1], dtype=torch.bool, device=y.device), diagonal=1).unsqueeze(1).repeat(1,y.shape[1],1)
             y = y.masked_fill(mask == True, -torch.inf)
         if key_mask is not None:
             mask = key_mask.T.unsqueeze(0).repeat(y.shape[0], 1, 1)
@@ -148,7 +148,7 @@ class AttentionBlock(nn.Module):
 
 class Transformer(nn.Module):
 
-    def __init__(self, dvocin, dvocout, dm, h, dff, nenc, ndec, stok=0, etok=1, ptok=2, drop=0.0):
+    def __init__(self, dvocin, dvocout, dm, h, dff, nenc, ndec, stok=0, etok=1, ptok=2, drop=0.0, max_toks=100):
         super().__init__()
 
         # store start, end and padding tokens
@@ -158,6 +158,8 @@ class Transformer(nn.Module):
 
         self.in_emb = nn.Embedding(dvocin, dm)
         self.out_emb = nn.Embedding(dvocout, dm)
+
+        self.register_buffer('pos_enc', self.init_pos_enc(max_toks, dm))
 
         self.encoder = nn.ModuleList([AttentionBlock(h, dm, dff, drop) for _ in range(nenc)])
         self.decoder = nn.ModuleList([AttentionBlock(h, dm, dff, drop, decoder=True) for _ in range(ndec)])
@@ -169,14 +171,12 @@ class Transformer(nn.Module):
 
         self.dropout = nn.Dropout(p=drop)
 
-    def pos_enc(self, X):
+    def init_pos_enc(self, max_toks, dm):
 
-        pos = torch.arange(X.shape[0]).repeat(X.shape[-1],1).T
-        idx = torch.arange(X.shape[-1]).repeat(X.shape[0],1)
+        pos = torch.arange(max_toks).repeat(dm,1).T
+        idx = torch.arange(dm).repeat(max_toks,1)
 
-        res = torch.sin(pos / 10000**((idx-torch.remainder(idx,2))/X.shape[-1]) + torch.remainder(idx,2) * torch.pi/2)
-
-        return res.unsqueeze(1).repeat(1, X.shape[1], 1)
+        return (torch.sin(pos / 10000**((idx-torch.remainder(idx,2))/dm) + torch.remainder(idx,2) * torch.pi/2)).unsqueeze(1)
         
     def forward(self, X, Y):
 
@@ -184,16 +184,16 @@ class Transformer(nn.Module):
         # Y: target sequence: nt x nbatch
 
         # get padding masks
-        X_mask = (X == self.ptok)
-        Y_mask = (Y == self.ptok)
+        X_mask = (X == self.ptok).to(X.device)
+        Y_mask = (Y == self.ptok).to(Y.device)
 
         # embeddings
         X = self.in_emb(X) * math.sqrt(self.in_emb.weight.shape[1])
         Y = self.out_emb(Y) * math.sqrt(self.out_emb.weight.shape[1])
 
         # positional encodings
-        X += self.pos_enc(X)
-        Y += self.pos_enc(Y)
+        X += self.pos_enc[:X.shape[0]]
+        Y += self.pos_enc[:Y.shape[0]]
 
         # dropout
         X = self.dropout(X)
