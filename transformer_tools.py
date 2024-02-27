@@ -21,7 +21,7 @@ def update_state_dict(src_state, tgt_state):
     }
 
     W_names = ['WQ', 'WK', 'WV']
-    W_heads = len([key for key in tgt_state.keys() if ('encoder.0.self_attention.WQ' in key) and ('weight' in key)])
+    num_heads = len([key for key in tgt_state.keys() if ('encoder.0.self_attention.WQ' in key) and ('weight' in key)])
     W_dict = {}
     for key in src_state:
         for var in ['weight', 'bias']:
@@ -29,9 +29,9 @@ def update_state_dict(src_state, tgt_state):
                 W_weights = torch.split(src_state[key], len(src_state[key]) // len(W_names))
                 
                 for n, name in enumerate(W_names):
-                    W_heads = torch.split(W_weights[n], len(W_weights[n]) // W_heads)
+                    W_heads = torch.split(W_weights[n], len(W_weights[n]) // num_heads)
 
-                    for h in range(W_heads):
+                    for h in range(num_heads):
                         W_dict[key.replace(f'in_proj_{var}', f'{name}.{h}.{var}')] = W_heads[h]
 
     src_state.update(W_dict)
