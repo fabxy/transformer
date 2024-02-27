@@ -70,7 +70,6 @@ class MHA(nn.Module):
         super().__init__()
 
         # dimensions: dm to dk to dv to h*dv to dm
-
         self.h = h
 
         if dk is None:
@@ -80,10 +79,6 @@ class MHA(nn.Module):
             dv = dk
 
         # initialize weights
-        # self.WQ = nn.ParameterList([nn.Parameter(torch.Tensor(dm, dk).uniform_(-1/math.sqrt(dm), 1/math.sqrt(dm)), requires_grad=True) for _ in range(self.h)])
-        # self.WK = nn.ParameterList([nn.Parameter(torch.Tensor(dm, dk).uniform_(-1/math.sqrt(dm), 1/math.sqrt(dm)), requires_grad=True) for _ in range(self.h)])
-        # self.WV = nn.ParameterList([nn.Parameter(torch.Tensor(dm, dv).uniform_(-1/math.sqrt(dm), 1/math.sqrt(dm)), requires_grad=True) for _ in range(self.h)])
-        # self.WO = nn.Parameter(torch.Tensor(h*dv, dm).uniform_(-1/math.sqrt(h*dv), 1/math.sqrt(h*dv)), requires_grad=True)
         self.WQ = nn.ModuleList([nn.Linear(dm, dk) for _ in range(self.h)])
         self.WK = nn.ModuleList([nn.Linear(dm, dk) for _ in range(self.h)])
         self.WV = nn.ModuleList([nn.Linear(dm, dv) for _ in range(self.h)])
@@ -218,7 +213,7 @@ class Transformer(nn.Module):
         Y = self.linear(Y)
 
         # softmax
-        Y = torch.softmax(Y, dim=-1)
+        # Y = torch.softmax(Y, dim=-1)
 
         return Y
 

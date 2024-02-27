@@ -1,4 +1,6 @@
 import torch
+import torch.nn as nn
+from torch import Tensor
 
 from torchtext.data.utils import get_tokenizer
 from torchtext.vocab import build_vocab_from_iterator
@@ -10,8 +12,9 @@ from torch.nn.utils.rnn import pad_sequence
 
 from transformer import Transformer
 from tqdm import tqdm
+import math
 
-torch.autograd.set_detect_anomaly(True)
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Get data
 # We need to modify the URLs for the dataset since the links to the original dataset are broken
@@ -93,6 +96,7 @@ def collate_fn(batch):
     return src_batch, tgt_batch
 
 train_dataloader = DataLoader(train_iter, batch_size=BATCH_SIZE, collate_fn=collate_fn)
+num_batches = math.ceil(multi30k.NUM_LINES['train'] / BATCH_SIZE)
 
 # Set seed
 torch.manual_seed(0)
@@ -113,6 +117,24 @@ hyperparams = {
 }
 
 model = Transformer(**hyperparams)
+
+# Set up tutorial model for comparison
+from transformer_tutorial import Seq2SeqTransformer, create_mask
+
+transformer = Seq2SeqTransformer(hyperparams['nenc'], hyperparams['ndec'], hyperparams['dm'], hyperparams['h'], hyperparams['dvocin'], hyperparams['dvocout'], hyperparams['dff'], hyperparams['drop'])
+transformer = transformer.to(DEVICE)
+
+for p in transformer.parameters():
+    if p.dim() > 1:
+        nn.init.xavier_uniform_(p)
+
+# Copy weights
+from transformer_tools import update_state_dict
+model_state = model.state_dict()
+transformer_state = transformer.state_dict()
+
+model_state = update_state_dict(transformer_state, model_state)
+model.load_state_dict(model_state)
 
 # Define training
 train_params = {
@@ -137,11 +159,14 @@ loss_fun = torch.nn.CrossEntropyLoss(ignore_index=train_params['ignore_idx'], la
 for epoch in range(train_params['epochs']):
 
     model.train()
-    for src, tgt in (p := tqdm(train_dataloader, desc=f"Epoch {epoch}")):
+    for src, tgt in (p := tqdm(train_dataloader, desc=f"Epoch {epoch}", total=num_batches)):
 
         optimizer.zero_grad()
 
-        probs = model(src, tgt[:-1]) 
+        probs = model(src, tgt[:-1])
+        
+        src_mask, tgt_mask, src_padding_mask, tgt_padding_mask = create_mask(src, tgt[:-1], pad_idx=PAD_IDX, device=DEVICE)
+        probs_transformer = transformer(src, tgt[:-1], src_mask, tgt_mask, src_padding_mask, tgt_padding_mask, src_padding_mask)
 
         loss = loss_fun(torch.permute(probs, (1, 2, 0)), tgt[1:].T)
         loss.backward()
