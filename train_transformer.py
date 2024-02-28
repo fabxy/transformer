@@ -14,8 +14,10 @@ from transformer import Transformer
 from tqdm import tqdm
 import math
 
-# DEVICE = 'cpu'
-DEVICE = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+import plotext as plt
+
+DEVICE = 'cpu'
+# DEVICE = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
 
 # Set up data pipeline
 # We need to modify the URLs for the dataset since the links to the original dataset are broken
@@ -100,7 +102,7 @@ max_toks += 2
 torch.manual_seed(0)
 
 # Define model
-hyperparams = {
+model_params = {
     'dvocin': len(vocab_transform[SRC_LANGUAGE]),
     'dvocout': len(vocab_transform[TGT_LANGUAGE]),
     'max_toks': max_toks,
@@ -115,7 +117,7 @@ hyperparams = {
     'drop': 0.1,
 }
 
-model = Transformer(**hyperparams)
+model = Transformer(**model_params)
 model = model.to(DEVICE)
 
 # Define training
@@ -129,24 +131,29 @@ train_params = {
     'steps': int(1e5),
     'ignore_idx': PAD_IDX,
     'eps_ls': 0.0,
-    'epochs': 18
+    'epochs': 50
 }
-save_path = "first_model.pt"
+save_path = "second_model.pt"
 
 optimizer = torch.optim.Adam(model.parameters(), lr=train_params['lr'], betas=(train_params['beta1'], train_params['beta2']), eps=train_params['eps'])
 
-# lr_lambda = lambda step: hyperparams['dm']**(-0.5) * min((step+1)**(-0.5), (step+1)**(-0.5) * train_params['init_steps']**(-1.5))
+# lr_lambda = lambda step: model_params['dm']**(-0.5) * min((step+1)**(-0.5), (step+1)**(-0.5) * train_params['init_steps']**(-1.5))
 # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 loss_fun = torch.nn.CrossEntropyLoss(ignore_index=train_params['ignore_idx'], label_smoothing=train_params['eps_ls'])
 
+train_losses = []
+val_losses = []
+plot_losses = True
 for epoch in range(train_params['epochs']):
 
+    # Training
     train_iter = Multi30k(split='train', language_pair=(SRC_LANGUAGE, TGT_LANGUAGE))
     train_dataloader = DataLoader(train_iter, batch_size=train_params['batch_size'], collate_fn=collate_fn)
     num_batches = math.ceil(multi30k.NUM_LINES['train'] / train_params['batch_size'])
 
     model.train()
+    losses = []
     for src, tgt in (p := tqdm(train_dataloader, desc=f"Epoch {epoch}", total=num_batches)):
         
         src = src.to(DEVICE)
@@ -162,7 +169,52 @@ for epoch in range(train_params['epochs']):
         optimizer.step()
         # scheduler.step()
 
+        losses.append(loss.item())
         p.set_postfix(loss=loss.item())
 
-if save_path is not None:
-    torch.save(model.state_dict(), save_path)
+    if plot_losses:
+        plt.scatter(losses, marker='dot', color='black')
+        plt.plotsize(plt.tw(),10)
+        plt.xticks([])
+        plt.xaxes(0,0)
+        plt.yaxes(1,0)
+        plt.clc()
+        plt.show()
+
+    train_losses.append(losses)
+
+    # Validation
+    val_iter = Multi30k(split='valid', language_pair=(SRC_LANGUAGE, TGT_LANGUAGE))
+    val_dataloader = DataLoader(val_iter, batch_size=train_params['batch_size'], collate_fn=collate_fn)
+    num_batches = math.ceil(multi30k.NUM_LINES['valid'] / train_params['batch_size'])
+
+    losses = []
+    for src, tgt in (p := tqdm(val_dataloader, desc=f"Validation", total=num_batches)):
+
+        src = src.to(DEVICE)
+        tgt = tgt.to(DEVICE)
+
+        probs = model(src, tgt[:-1])
+        loss = loss_fun(torch.permute(probs, (1, 2, 0)), tgt[1:].T)
+
+        losses.append(loss.item())
+        p.set_postfix(loss=loss.item())
+
+    val_loss = sum(losses) / num_batches
+    val_losses.append(val_loss)
+    print(f'Validation loss: {val_loss:.2f}')
+
+    # Storing
+    if save_path is not None:
+
+        state_dict = {
+            'epoch': epoch,
+            'model_state': model.state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'model_params': model_params,
+            'train_params': train_params,
+            'train_losses': train_losses,
+            'val_losses': val_losses,
+        }
+
+        torch.save(state_dict, save_path)
