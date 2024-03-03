@@ -180,6 +180,7 @@ for epoch in range(train_params['epochs']):
         plt.yaxes(1,0)
         plt.clc()
         plt.show()
+        plt.clear_figure()
 
     train_losses.append(losses)
 
